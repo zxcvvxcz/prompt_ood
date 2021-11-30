@@ -21,8 +21,15 @@ import os
 import random
 import sys
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from dataclasses import dataclass, field
 from typing import Optional
+
+from torch.utils.data import DataLoader
+from utils import load_intent_datasets, collate_fn
+from ood_evaluation import compute_ood, evaluate_ood, prepare_ood
+import pdb
 
 import numpy as np
 from datasets import load_dataset, load_metric
@@ -43,7 +50,7 @@ from transformers import (
 )
 from transformers.trainer_utils import get_last_checkpoint, is_main_process
 from transformers.utils import check_min_version
-import pdb
+
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.4.0")
@@ -58,7 +65,13 @@ task_to_keys = {
     "sst2": ("sentence", None),
     "stsb": ("sentence1", "sentence2"),
     "wnli": ("sentence1", "sentence2"),
+    'clinc150': ("text", None),
+    'snips': ("text", None),
+    'banking77': ("text", None),
 }
+
+intent_tasks=['clinc150', 'snips', 'banking77']
+dataloader_cols = ['input_ids', 'attention_mask', 'label']
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +135,11 @@ class DataTrainingArguments:
         default=None, metadata={"help": "A csv or a json file containing the validation data."}
     )
     test_file: Optional[str] = field(default=None, metadata={"help": "A csv or a json file containing the test data."})
+    split: Optional[bool] = field(default=True, 
+                                 metadata={"help": "Split setting for OOD detection."})
+    split_ratio: Optional[float] = field(default=0.5, 
+                                 metadata={"help": "Split ratio for OOD detection."})
+    
 
     def __post_init__(self):
         if self.task_name is not None:
@@ -159,7 +177,7 @@ class ModelArguments:
         metadata={"help": "Where do you want to store the pretrained models downloaded from huggingface.co"},
     )
     use_fast_tokenizer: bool = field(
-        default=True,
+        default=False,
         metadata={"help": "Whether to use one of the fast tokenizer (backed by the tokenizers library) or not."},
     )
     model_revision: str = field(
@@ -244,7 +262,9 @@ def main():
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-
+    print(f'model_args: {model_args}')
+    print(f'data_args: {data_args}')
+    print(f'training_args: {training_args}')
     torch.use_deterministic_algorithms(training_args.use_deterministic_algorithms)
     logger.info("use_deterministic_algorithms: " + str(torch.are_deterministic_algorithms_enabled()))
 
@@ -269,15 +289,20 @@ def main():
         datefmt="%m/%d/%Y %H:%M:%S",
         handlers=[logging.StreamHandler(sys.stdout)],
     )
-    logger.setLevel(logging.INFO if is_main_process(training_args.local_rank) else logging.WARN)
+    # torchrun code
+    # if not, use training_args.local_rank
+    # local_rank = int(os.environ["LOCAL_RANK"])
+    local_rank = training_args.local_rank
+    
+    logger.setLevel(logging.INFO if is_main_process(local_rank) else logging.WARN)
 
     # Log on each process the small summary:
     logger.warning(
-        f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}"
-        + f"distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}"
+        f"Process rank: {local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}"
+        + f"distributed training: {bool(local_rank != -1)}, 16-bits training: {training_args.fp16}"
     )
     # Set the verbosity to info of the Transformers logger (on main process only):
-    if is_main_process(training_args.local_rank):
+    if is_main_process(local_rank):
         transformers.utils.logging.set_verbosity_info()
         transformers.utils.logging.enable_default_handler()
         transformers.utils.logging.enable_explicit_format()
@@ -298,7 +323,9 @@ def main():
     #
     # In distributed training, the load_dataset function guarantee that only one local process can concurrently
     # download the dataset.
-    if data_args.task_name is not None:
+    if data_args.task_name in ['clinc150', 'snips', 'banking77']:
+        datasets, label_list = load_intent_datasets(data_args.task_name, split=data_args.split, ratio=data_args.split_ratio)
+    elif data_args.task_name is not None:
         # Downloading and loading a dataset from the hub.
         datasets = load_dataset("glue", data_args.task_name)
     else:
@@ -330,15 +357,19 @@ def main():
             datasets = load_dataset("json", data_files=data_files)
     # See more about loading any type of standard or custom dataset at
     # https://huggingface.co/docs/datasets/loading_datasets.html.
-    
+
     # Labels
+    
     if data_args.task_name is not None:
         is_regression = data_args.task_name == "stsb"
-        if not is_regression:
-            label_list = datasets["train"].features["label"].names
+        if data_args.task_name in intent_tasks:
             num_labels = len(label_list)
         else:
-            num_labels = 1
+            if not is_regression:
+                label_list = datasets["train"].features["label"].names
+                num_labels = len(label_list)
+            else:
+                num_labels = 1
     else:
         # Trying to have good defaults here, don't hesitate to tweak to your needs.
         is_regression = datasets["train"].features["label"].dtype in ["float32", "float64"]
@@ -375,6 +406,8 @@ def main():
         apply_prefix=model_args.apply_prefix,
         num_prefix=model_args.num_prefix,
         mid_dim=model_args.mid_dim,
+        # for ood, output_hidden_states=True on eval
+        output_hidden_states=False,
     )
 
     tokenizer = AutoTokenizer.from_pretrained(
@@ -397,6 +430,7 @@ def main():
     )
 
     trainable_params = []
+    method_name = ''
     if model_args.apply_lora:
         if model_args.lora_path is not None:
             lora_state_dict = torch.load(model_args.lora_path)
@@ -404,6 +438,7 @@ def main():
             logger.info(lora_state_dict.keys())
             model.load_state_dict(lora_state_dict, strict=False)
         trainable_params.append('lora')
+        method_name += 'lora'
 
     if model_args.apply_adapter:
         if model_args.adapter_path is not None:
@@ -423,12 +458,15 @@ def main():
                 assert 'adapter' not in missing_key, missing_key + ' is missed in the model'
             assert len(unexpected_keys) == 0, 'Unexpected keys ' + str(unexpected_keys)
         trainable_params.append('adapter')
+        method_name += 'adapter'
 
     if model_args.apply_bitfit:
         trainable_params.append('bias')
+        method_name += 'bias'
 
     if model_args.apply_prefix:
         trainable_params.append('prefix')
+        method_name += 'prefix'
 
     if len(trainable_params) > 0:
         for name, param in model.named_parameters():
@@ -448,8 +486,6 @@ def main():
     num_total_params = sum(p.numel() for p in model.parameters())
     logger.info(f'trainable params {num_trainable_params} / total params {num_total_params} = ratio {100 * num_trainable_params/num_total_params} ')
     
-    
-    
     # Preprocessing the datasets
     if data_args.task_name is not None:
         sentence1_key, sentence2_key = task_to_keys[data_args.task_name]
@@ -465,10 +501,12 @@ def main():
                 sentence1_key, sentence2_key = non_label_column_names[0], None
 
     # Padding strategy
+    print(f"Pad to max length: {data_args.pad_to_max_length}")
     if data_args.pad_to_max_length:
         padding = "max_length"
     else:
         # We will pad later, dynamically at batch creation, to the max sequence length in each batch
+        # padding = True
         padding = False
 
     # Some models have set the order of the labels to use, so let's make sure we do use it.
@@ -514,46 +552,98 @@ def main():
         if model_args.apply_prefix:
             result.pop('attention_mask')
         return result
-    datasets = datasets.map(preprocess_function, batched=True, load_from_cache_file=not data_args.overwrite_cache)
+    def preprocess_function_ood(example_tuple):
+        idx, examples = example_tuple
+        inputs = (
+            (examples[sentence1_key],) if sentence2_key is None else (examples[sentence1_key] + " " + examples[sentence2_key],)
+        )
+        result = tokenizer(*inputs, padding=padding, max_length=max_seq_length, truncation=True)
+        result["label"] = examples["label"] if 'label' in examples else 0
+        result['idx'] = idx
+        # TODO : remove
+        if model_args.apply_prefix:
+            result.pop('attention_mask')
+        return result
+
+    if data_args.task_name not in intent_tasks:
+        datasets = datasets.map(preprocess_function, batched=True, load_from_cache_file=not data_args.overwrite_cache)
     if training_args.do_train:
-        if "train" not in datasets:
-            raise ValueError("--do_train requires a train dataset")
-        train_dataset = datasets["train"]
-        if data_args.max_train_samples is not None:
-            train_dataset = train_dataset.select(range(data_args.max_train_samples))
+        if data_args.task_name in intent_tasks:
+            train_dataset = list(map(preprocess_function_ood, enumerate(datasets['train']))) if 'train' in datasets else None
+            train_dataset = [{k:v for k, v in x.items() if k in dataloader_cols} for x in train_dataset]
+            if data_args.max_train_samples is not None:
+                train_dataset = train_dataset[:data_args.max_train_samples]
+        else:
+            if "train" not in datasets:
+                raise ValueError("--do_train requires a train dataset")
+            train_dataset = datasets["train"]
+            if data_args.max_train_samples is not None:
+                train_dataset = train_dataset.select(range(data_args.max_train_samples))
+        
+    label_id_list = []
+    for train_data in train_dataset:
+        label = train_data['label']
+        if label not in label_id_list:
+            label_id_list.append(label)
+        
+        
         
     if training_args.do_eval:
-        if "validation" not in datasets and "validation_matched" not in datasets:
-            raise ValueError("--do_eval requires a validation dataset")
-        eval_dataset = datasets["validation_matched" if data_args.task_name == "mnli" else "validation"]
-        if data_args.max_val_samples is not None:
-            eval_dataset = eval_dataset.select(range(data_args.max_val_samples))
+        if data_args.task_name in intent_tasks:
+            eval_dataset = list(map(preprocess_function_ood, enumerate(datasets['validation']))) if 'validation' in datasets else None
+            eval_dataset = [{k:v for k, v in x.items() if k in dataloader_cols} for x in eval_dataset]
+            if data_args.max_val_samples is not None:
+                eval_dataset = eval_dataset[:data_args.max_val_samples]
+        else:
+            if "validation" not in datasets and "validation_matched" not in datasets:
+                raise ValueError("--do_eval requires a validation dataset")
+            eval_dataset = datasets["validation_matched" if data_args.task_name == "mnli" else "validation"]
+            if data_args.max_val_samples is not None:
+                eval_dataset = eval_dataset.select(range(data_args.max_val_samples))
 
+    test_ind_dataset = None
+    test_ood_dataset = None
+    
     if training_args.do_predict or data_args.task_name is not None or data_args.test_file is not None:
-        if "test" not in datasets and "test_matched" not in datasets:
-            raise ValueError("--do_predict requires a test dataset")
-        test_dataset = datasets["test_matched" if data_args.task_name == "mnli" else "test"]
-        if data_args.max_test_samples is not None:
-            test_dataset = test_dataset.select(range(data_args.max_test_samples))
+        if data_args.task_name in intent_tasks:
+            test_ind_dataset = list(map(preprocess_function_ood, enumerate(datasets['test_ind']))) if 'test_ind' in datasets else None
+            test_ood_dataset = list(map(preprocess_function_ood, enumerate(datasets['test_ood']))) if 'test_ood' in datasets else None
+            test_ind_dataset = [{k:v for k, v in x.items() if k in dataloader_cols} for x in test_ind_dataset]
+            if data_args.max_test_samples is not None:
+                test_ind_dataset = test_ind_dataset[:data_args.max_test_samples]
+            test_ood_dataset = [{k:v for k, v in x.items() if k in dataloader_cols} for x in test_ood_dataset]
+            if data_args.max_test_samples is not None:
+                test_ood_dataset = test_ood_dataset[:data_args.max_test_samples]
+        else:
+            if "test" not in datasets and "test_matched" not in datasets:
+                raise ValueError("--do_predict requires a test dataset")
+            test_dataset = datasets["test_matched" if data_args.task_name == "mnli" else "test"]
+            if data_args.max_test_samples is not None:
+                test_dataset = test_dataset.select(range(data_args.max_test_samples))
 
         ## if there is no label in test set -> we cannot evaluate final score
         ## we use the dev set as the final test set 
         ## split the train set 70:30 -> train : dev set
-        if "label" not in test_dataset:
-            assert train_dataset is not None, 'Train dataset is None.'
-            assert eval_dataset is not None, 'Eval dataset is None.'
-            train_test_split = train_dataset.train_test_split(test_size=0.3)
+            if "label" not in test_dataset:
+                assert train_dataset is not None, 'Train dataset is None.'
+                assert eval_dataset is not None, 'Eval dataset is None.'
+                train_test_split = train_dataset.train_test_split(test_size=0.3)
 
-            test_dataset = eval_dataset
-            train_dataset = train_test_split['train']
-            eval_dataset = train_test_split['test']
-
+                test_dataset = eval_dataset
+                train_dataset = train_test_split['train']
+                eval_dataset = train_test_split['test']
+                
     if training_args.do_train:
         logger.info(f'# TRAIN dataset : {len(train_dataset)}')
     if training_args.do_eval:
         logger.info(f'# Eval  dataset : {len(eval_dataset)}')
     if training_args.do_predict or data_args.task_name is not None or data_args.test_file is not None:
-        logger.info(f'# TEST  dataset : {len(test_dataset)}')
+        if data_args.task_name in intent_tasks:
+            logger.info(f'# TEST IND dataset : {len(test_ind_dataset)}')
+            logger.info(f'# TEST OOD dataset : {len(test_ood_dataset)}')
+        else:
+            logger.info(f'# TEST  dataset : {len(test_dataset)}')
+        
     ## DONE LOADING DATASET ##
 
     # TODO : not used
@@ -564,24 +654,33 @@ def main():
 
     # Get the metric function
     if data_args.task_name is not None:
-        metric = load_metric("glue", data_args.task_name)
+        if data_args.task_name in intent_tasks:
+            metric = None
+        else:
+            metric = load_metric("glue", data_args.task_name)
     # TODO: When datasets metrics include regular accuracy, make an else here and remove special branch from
     # compute_metrics
 
     # You can define your custom compute_metrics function. It takes an `EvalPrediction` object (a namedtuple with a
     # predictions and label_ids field) and has to return a dictionary string to float.
     def compute_metrics(p: EvalPrediction):
-        preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
-        preds = np.squeeze(preds) if is_regression else np.argmax(preds, axis=1)
-        if data_args.task_name is not None:
+        
+        logits = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
+        preds = np.squeeze(logits) if is_regression else np.argmax(logits, axis=1)
+        result = {}
+        if data_args.task_name is not None and data_args.task_name not in intent_tasks:
+            print("Compute metrics 1")
             result = metric.compute(predictions=preds, references=p.label_ids)
             if len(result) > 1:
                 result["combined_score"] = np.mean(list(result.values())).item()
             return result
         elif is_regression:
-            return {"mse": ((preds - p.label_ids) ** 2).mean().item()}
+            print("Compute metrics 2")
+            result['mse'] = ((preds - p.label_ids) ** 2).mean().item()
         else:
-            return {"accuracy": (preds == p.label_ids).astype(np.float32).mean().item()}
+            print("Compute metrics 3")
+            result['IND accuracy'] = (preds == p.label_ids).astype(np.float32).mean().item()
+        return result
 
     # Data collator will default to DataCollatorWithPadding, so we change it if we already did the padding.
     if data_args.pad_to_max_length:
@@ -595,6 +694,8 @@ def main():
     training_args.ddp_find_unused_parameters = True
 
     # Initialize our Trainer
+    print(f"Tokenizer: {tokenizer}")
+    pdb.set_trace()
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -615,8 +716,9 @@ def main():
             # checkpoint.
             if AutoConfig.from_pretrained(model_args.model_name_or_path).num_labels == num_labels:
                 checkpoint = model_args.model_name_or_path
-
+        
         train_result = trainer.train(resume_from_checkpoint=checkpoint)
+
         metrics = train_result.metrics
         max_train_samples = (
             data_args.max_train_samples if data_args.max_train_samples is not None else len(train_dataset)
@@ -640,6 +742,7 @@ def main():
             tasks.append("mnli-mm")
             eval_datasets.append(datasets["validation_mismatched"])
 
+            output_hidden_states=False,
         for eval_dataset, task in zip(eval_datasets, tasks):
             metrics = trainer.evaluate(eval_dataset=eval_dataset)
 
@@ -651,31 +754,44 @@ def main():
 
     if training_args.do_predict:
         logger.info("*** Test ***")
-
-        # Loop to handle MNLI double evaluation (matched, mis-matched)
-        tasks = [data_args.task_name]
-        test_datasets = [test_dataset]
-        if data_args.task_name == "mnli":
-            tasks.append("mnli-mm")
-            test_datasets.append(datasets["test_mismatched"])
-
-        for test_dataset, task in zip(test_datasets, tasks):
-            # Removing the `label` columns because it contains -1 and Trainer won't like that.
-            test_dataset.remove_columns_("label")
-            predictions = trainer.predict(test_dataset=test_dataset).predictions
-            predictions = np.squeeze(predictions) if is_regression else np.argmax(predictions, axis=1)
-
-            output_test_file = os.path.join(training_args.output_dir, f"test_results_{task}.txt")
+        output_test_file = os.path.join(training_args.output_dir, f"test_results_{task}.txt")
+        if data_args.task_name in intent_tasks:
+            # use train dataset or eval dataset
+            print("OOD Evaluation...")
+            maha_dataloader = DataLoader(train_dataset, collate_fn=collate_fn) 
+            class_mean, class_var, norm_bank = prepare_ood(trainer.model, label_id_list, maha_dataloader)
+            result = evaluate_ood(training_args, data_args, method_name, trainer.model, label_id_list, class_mean, class_var, norm_bank, test_ind_dataset, test_ood_dataset, "test", tokenizer)
             if trainer.is_world_process_zero():
                 with open(output_test_file, "w") as writer:
                     logger.info(f"***** Test results {task} *****")
                     writer.write("index\tprediction\n")
-                    for index, item in enumerate(predictions):
-                        if is_regression:
-                            writer.write(f"{index}\t{item:3.3f}\n")
-                        else:
-                            item = label_list[item]
-                            writer.write(f"{index}\t{item}\n")
+                    for k, v in result.items():
+                        writer.write(f"{k}\t{v}\n")
+        # Loop to handle MNLI double evaluation (matched, mis-matched)
+        else:
+            tasks = [data_args.task_name]
+            test_datasets = [test_dataset]
+            if data_args.task_name == "mnli":
+                tasks.append("mnli-mm")
+                test_datasets.append(datasets["test_mismatched"])
+
+            for test_dataset, task in zip(test_datasets, tasks):
+                # Removing the `label` columns because it contains -1 and Trainer won't like that.
+                test_dataset.remove_columns_("label")
+                logits = trainer.predict(test_dataset=test_dataset).predictions
+                predictions = np.squeeze(logits) if is_regression else np.argmax(logits, axis=1)
+
+                
+                if trainer.is_world_process_zero():
+                    with open(output_test_file, "w") as writer:
+                        logger.info(f"***** Test results {task} *****")
+                        writer.write("index\tprediction\n")
+                        for index, item in enumerate(predictions):
+                            if is_regression:
+                                writer.write(f"{index}\t{item:3.3f}\n")
+                            else:
+                                item = label_list[item]
+                                writer.write(f"{index}\t{item}\n")
 
 
 def _mp_fn(index):

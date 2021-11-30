@@ -1,0 +1,9 @@
+{
+    "PlayMusic": 2,
+    "AddToPlaylist": 3,
+    "RateBook": 0,
+    "SearchScreeningEvent": 1,
+    "BookRestaurant": 5,
+    "GetWeather": 6,
+    "SearchCreativeWork": 4
+}
