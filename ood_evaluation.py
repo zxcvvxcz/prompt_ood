@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 import hydra
 from torch.utils.data import DataLoader
+import torch.distributed as dist
 import pdb
 from nltk.tokenize.treebank import TreebankWordDetokenizer, TreebankWordTokenizer
 from sklearn.covariance import LedoitWolf
@@ -12,6 +13,7 @@ import json
 import matplotlib.pyplot as plt
 import pickle
 import os
+from tqdm import tqdm
 from utils import collate_fn
 from sklearn.metrics import roc_auc_score
 
@@ -52,15 +54,17 @@ def merge_keys(l, keys):
     return new_dict
 
 
-def evaluate_ood(training_args, data_args, method_name, model, label_id_list, class_mean, class_var, norm_bank, features, ood, tag, tokenizer):
+def evaluate_ood(training_args, data_args, method_name, model, label_id_list, class_mean, class_var, norm_bank, features, ood, tag, tokenizer, apply_prefix=False):
     print('Start evaluation for OOD...')
     keys = ['softmax', 'maha', 'cosine', 'energy','maha_acc']
 
     dataloader = DataLoader(features, batch_size=training_args.per_device_eval_batch_size , collate_fn=collate_fn)
     in_scores = []
-    for batch in dataloader:
+    for batch in tqdm(dataloader, desc='Scoring testset(IND)'):
         model.eval()
         batch = {key: value.to(training_args.device) for key, value in batch.items()}
+        if apply_prefix:
+            batch.pop('attention_mask')
         with torch.no_grad():
             ood_keys = compute_ood(model, **batch, label_id_list=label_id_list, class_mean=class_mean, 
                                          class_var=class_var, norm_bank=norm_bank, ind = True)
@@ -70,9 +74,11 @@ def evaluate_ood(training_args, data_args, method_name, model, label_id_list, cl
     dataloader = DataLoader(ood, batch_size=training_args.per_device_eval_batch_size , collate_fn=collate_fn)
     out_scores = []
     out_labels_origin = []
-    for batch in dataloader:
+    for batch in tqdm(dataloader, desc='Scoring testset(OOD)'):
         model.eval()
         batch = {key: value.to(training_args.device) for key, value in batch.items()}
+        if apply_prefix:
+            batch.pop('attention_mask')
         with torch.no_grad():
             ood_keys = compute_ood(model, **batch, label_id_list=label_id_list, class_mean=class_mean, 
                                          class_var=class_var, norm_bank=norm_bank, ind = False)
@@ -104,7 +110,7 @@ def evaluate_ood(training_args, data_args, method_name, model, label_id_list, cl
     plt.close('all')
     
     outputs = {}
-    for key in keys:
+    for key in tqdm(keys, desc=f'Calculating OOD metrics'):
         
         if key == 'maha_acc':
             outputs[tag+"_"+key] = float(in_scores[key] /len(features))
@@ -160,7 +166,7 @@ def evaluate_ood(training_args, data_args, method_name, model, label_id_list, cl
                     for fpr_i in fpr_indices[:total_error_cnt]:
                         score = scores[fpr_i]
                         input_ids = torch.LongTensor(ood[fpr_i - len(inl)]['input_ids']).unsqueeze(0).to(model.device)
-                        attention_mask = torch.FloatTensor(ood[fpr_i - len(inl)]['attention_mask']).unsqueeze(0).to(model.device)
+                        attention_mask = torch.FloatTensor(ood[fpr_i - len(inl)]['attention_mask']).unsqueeze(0).to(model.device) if not apply_prefix else None
                         model_output = model(input_ids=input_ids, attention_mask=attention_mask)
             
                         sm = nn.Softmax(dim=1)
@@ -245,17 +251,17 @@ def fpr_and_fdr_at_recall(y_true, y_score, return_indices, recall_level=0.95, po
         return fps[cutoff] / (np.sum(np.logical_not(y_true)))
 
 
-def prepare_ood(model, label_id_list, dataloader):
+def prepare_ood(model, label_id_list, dataloader, apply_prefix=True):
     model.config.output_hidden_states = True  
     bank = None
     label_bank = None
     print('Start preparation for OOD...')
-    for batch in dataloader:
+    for batch in tqdm(dataloader, desc='Preparing OOD'):
         batch = {key: value.cuda() for key, value in batch.items()}
         labels = batch['label']
         outputs = model(
             input_ids=batch['input_ids'],
-            attention_mask=batch['attention_mask'],
+            attention_mask=batch['attention_mask'] if not apply_prefix else None,
         )
 
         # last CLS!
@@ -287,7 +293,7 @@ def prepare_ood(model, label_id_list, dataloader):
     return class_mean, class_var, norm_bank
 
 
-def compute_ood(model, input_ids, attention_mask, label_id_list, class_mean, class_var, norm_bank, label=None, ind=False, indices=None, is_sigmoid=False):
+def compute_ood(model, input_ids, label_id_list, class_mean, class_var, norm_bank, attention_mask=None, label=None, ind=False, indices=None, is_sigmoid=False):
         outputs = model(input_ids, attention_mask=attention_mask,)
 
         # last CLS!

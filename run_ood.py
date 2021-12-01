@@ -18,17 +18,19 @@
 
 import logging
 import os
-import random
 import sys
+import csv
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
+
 from dataclasses import dataclass, field
 from typing import Optional
 
 from torch.utils.data import DataLoader
 from utils import load_intent_datasets, collate_fn
-from ood_evaluation import compute_ood, evaluate_ood, prepare_ood
+from ood_evaluation import evaluate_ood, prepare_ood
 import pdb
 
 import numpy as np
@@ -45,6 +47,7 @@ from transformers import (
     PretrainedConfig,
     Trainer,
     TrainingArguments,
+    TrainerCallback,
     default_data_collator,
     set_seed,
 )
@@ -177,7 +180,7 @@ class ModelArguments:
         metadata={"help": "Where do you want to store the pretrained models downloaded from huggingface.co"},
     )
     use_fast_tokenizer: bool = field(
-        default=False,
+        default=True,
         metadata={"help": "Whether to use one of the fast tokenizer (backed by the tokenizers library) or not."},
     )
     model_revision: str = field(
@@ -669,17 +672,17 @@ def main():
         preds = np.squeeze(logits) if is_regression else np.argmax(logits, axis=1)
         result = {}
         if data_args.task_name is not None and data_args.task_name not in intent_tasks:
-            print("Compute metrics 1")
             result = metric.compute(predictions=preds, references=p.label_ids)
             if len(result) > 1:
                 result["combined_score"] = np.mean(list(result.values())).item()
             return result
         elif is_regression:
-            print("Compute metrics 2")
             result['mse'] = ((preds - p.label_ids) ** 2).mean().item()
         else:
-            print("Compute metrics 3")
             result['IND accuracy'] = (preds == p.label_ids).astype(np.float32).mean().item()
+            class_mean, class_var, norm_bank = prepare_ood(trainer.model, label_id_list, maha_dataloader, model_args.apply_prefix)
+            ood_result = evaluate_ood(training_args, data_args, method_name, trainer.model, label_id_list, class_mean, class_var, norm_bank, test_ind_dataset, test_ood_dataset, "test", tokenizer, model_args.apply_prefix)
+            result.update(ood_result)
         return result
 
     # Data collator will default to DataCollatorWithPadding, so we change it if we already did the padding.
@@ -695,7 +698,6 @@ def main():
 
     # Initialize our Trainer
     print(f"Tokenizer: {tokenizer}")
-    pdb.set_trace()
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -704,9 +706,11 @@ def main():
         compute_metrics=compute_metrics,
         tokenizer=tokenizer,
         data_collator=data_collator,
+        callbacks=[myLogCallback]
     )
-
     # Training
+    maha_dataloader = DataLoader(train_dataset, batch_size=training_args.per_device_train_batch_size, collate_fn=collate_fn) 
+            
     if training_args.do_train:
         checkpoint = None
         if last_checkpoint is not None:
@@ -727,7 +731,7 @@ def main():
 
         trainer.save_model()  # Saves the tokenizer too for easy upload
 
-        # trainer.log_metrics("train", metrics)
+        trainer.log_metrics("train", metrics)
         trainer.save_metrics("train", metrics)
         trainer.save_state()
 
@@ -742,7 +746,6 @@ def main():
             tasks.append("mnli-mm")
             eval_datasets.append(datasets["validation_mismatched"])
 
-            output_hidden_states=False,
         for eval_dataset, task in zip(eval_datasets, tasks):
             metrics = trainer.evaluate(eval_dataset=eval_dataset)
 
@@ -758,9 +761,8 @@ def main():
         if data_args.task_name in intent_tasks:
             # use train dataset or eval dataset
             print("OOD Evaluation...")
-            maha_dataloader = DataLoader(train_dataset, collate_fn=collate_fn) 
-            class_mean, class_var, norm_bank = prepare_ood(trainer.model, label_id_list, maha_dataloader)
-            result = evaluate_ood(training_args, data_args, method_name, trainer.model, label_id_list, class_mean, class_var, norm_bank, test_ind_dataset, test_ood_dataset, "test", tokenizer)
+            class_mean, class_var, norm_bank = prepare_ood(trainer.model, label_id_list, maha_dataloader, model_args.apply_prefix)
+            result = evaluate_ood(training_args, data_args, method_name, trainer.model, label_id_list, class_mean, class_var, norm_bank, test_ind_dataset, test_ood_dataset, "test", tokenizer, model_args.apply_prefix)
             if trainer.is_world_process_zero():
                 with open(output_test_file, "w") as writer:
                     logger.info(f"***** Test results {task} *****")
@@ -797,7 +799,27 @@ def main():
 def _mp_fn(index):
     # For xla_spawn (TPUs)
     main()
-
+    
+    
+class myLogCallback(TrainerCallback):
+    def log_result(self, args, state, split):
+        if state.is_world_process_zero:
+            log_path = os.path.join(args.output_dir, f"{split}_logs.tsv")
+            if len(state.log_history) > 0:
+                last_log = state.log_history[-1]
+                write_setting = 'w' if last_log['epoch'] <= 1 else 'a'
+                with open(log_path, write_setting) as f:
+                    csv_writer = csv.writer(f, delimiter='\t')
+                    title = sorted(last_log.keys())
+                    if write_setting == 'w':
+                        csv_writer.writerow(title)
+                    csv_writer.writerow([last_log[k] for k in title])
+    def on_evaluate(self, args, state, control, **kwargs):
+        self.log_result(args, state, 'eval')
+    def on_epoch_end(self, args, state, control, **kwargs):
+        self.log_result(args, state, 'train')
+    # def on_train_end(self, args, state, control, **kwargs):
+    #     self.log_result(args, state, 'train')
 
 if __name__ == "__main__":
     main()

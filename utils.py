@@ -300,3 +300,25 @@ def collate_fn(batch):
         }
     return outputs
 
+
+def collate_fn_prefix(batch):
+    max_len = max([len(f["input_ids"]) for f in batch])
+    input_ids = [f["input_ids"] + [0] * (max_len - len(f["input_ids"])) for f in batch]
+    labels = [f["label"] for f in batch]
+    input_ids = torch.tensor(input_ids, dtype=torch.long)
+    labels = torch.tensor(labels, dtype=torch.long)
+    
+    if 'indices' in batch[0]:
+        indices = torch.LongTensor([f["indices"] for f in batch])
+        outputs = {
+            "input_ids": input_ids,
+            "label": labels,
+            "indices": indices,
+        }
+    else:
+        outputs = {
+            "input_ids": input_ids,
+            "label": labels,
+        }
+    return outputs
+

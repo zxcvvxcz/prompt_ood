@@ -2,14 +2,13 @@ export CUDA_VISIBLE_DEVICES=0,1,2
 export num_gpus=3
 export CUBLAS_WORKSPACE_CONFIG=":16:8" # https://docs.nvidia.com/cuda/cublas/index.html#cublasApi_reproducibility
 export PYTHONHASHSEED=0
-export task_name="snips"
+export task_name="banking77"
 export model_name="gpt2-medium"
 export output_dir="~/data/eff_tl"
-export split_ratio=0.5
+export split_ratio=0.75
 export TORCH_DISTRIBUTED_DEBUG=INFO
 
 learning_rates="1e-5"
-
 for learning_rate in $learning_rates; do
     python -m torch.distributed.launch --nproc_per_node=$num_gpus \
         run_ood.py \
