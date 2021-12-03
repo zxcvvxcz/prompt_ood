@@ -3,7 +3,6 @@ export num_gpus=3
 export CUBLAS_WORKSPACE_CONFIG=":16:8" # https://docs.nvidia.com/cuda/cublas/index.html#cublasApi_reproducibility
 export PYTHONHASHSEED=0
 export output_dir="~/data/eff_tl/gpt2_medium/clinc150/full"
-#export output_dir="./sst2_gpt"
 export TORCH_DISTRIBUTED_DEBUG=INFO
 
 learning_rates="1e-5"

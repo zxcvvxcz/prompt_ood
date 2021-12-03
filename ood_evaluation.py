@@ -14,8 +14,11 @@ import matplotlib.pyplot as plt
 import pickle
 import os
 from tqdm import tqdm
-from utils import collate_fn
+from utils import collate_fn, collate_fn_prefix
 from sklearn.metrics import roc_auc_score
+from accelerate import Accelerator
+
+accelerator = Accelerator()
 
 
 def merge_keys(l, keys):
@@ -54,14 +57,17 @@ def merge_keys(l, keys):
     return new_dict
 
 
-def evaluate_ood(training_args, data_args, method_name, model, label_id_list, class_mean, class_var, norm_bank, features, ood, tag, tokenizer, apply_prefix=False):
+def evaluate_ood(training_args, data_args, method_name, model, label_id_list, class_mean, class_var, norm_bank, features, ood, tag, tokenizer, apply_prefix=False, data_collator=collate_fn):
     print('Start evaluation for OOD...')
     keys = ['softmax', 'maha', 'cosine', 'energy','maha_acc']
 
-    dataloader = DataLoader(features, batch_size=training_args.per_device_eval_batch_size , collate_fn=collate_fn)
+    # dataloader = DataLoader(features, batch_size=training_args.per_device_eval_batch_size, 
+    #                         collate_fn=collate_fn_prefix if apply_prefix else collate_fn)
+    dataloader = DataLoader(features, batch_size=training_args.per_device_eval_batch_size, 
+                            collate_fn=data_collator)
     in_scores = []
+    model.eval()
     for batch in tqdm(dataloader, desc='Scoring testset(IND)'):
-        model.eval()
         batch = {key: value.to(training_args.device) for key, value in batch.items()}
         if apply_prefix:
             batch.pop('attention_mask')
@@ -71,11 +77,14 @@ def evaluate_ood(training_args, data_args, method_name, model, label_id_list, cl
             in_scores.append(ood_keys)
     in_scores = merge_keys(in_scores, keys)
     
-    dataloader = DataLoader(ood, batch_size=training_args.per_device_eval_batch_size , collate_fn=collate_fn)
+    # dataloader = DataLoader(ood, batch_size=training_args.per_device_eval_batch_size, 
+    #                         collate_fn=collate_fn_prefix if apply_prefix else collate_fn)
+    dataloader = DataLoader(ood, batch_size=training_args.per_device_eval_batch_size, 
+                            collate_fn=data_collator)
     out_scores = []
     out_labels_origin = []
+    model.eval()
     for batch in tqdm(dataloader, desc='Scoring testset(OOD)'):
-        model.eval()
         batch = {key: value.to(training_args.device) for key, value in batch.items()}
         if apply_prefix:
             batch.pop('attention_mask')
@@ -252,13 +261,16 @@ def fpr_and_fdr_at_recall(y_true, y_score, return_indices, recall_level=0.95, po
 
 
 def prepare_ood(model, label_id_list, dataloader, apply_prefix=True):
-    model.config.output_hidden_states = True  
+    model.config.output_hidden_states = True
     bank = None
     label_bank = None
+    pad_token_id = model.config.pad_token_id
     print('Start preparation for OOD...')
+    model.eval()
     for batch in tqdm(dataloader, desc='Preparing OOD'):
         batch = {key: value.cuda() for key, value in batch.items()}
-        labels = batch['label']
+        # print(batch['labels'])
+        labels = batch['labels']
         outputs = model(
             input_ids=batch['input_ids'],
             attention_mask=batch['attention_mask'] if not apply_prefix else None,
@@ -267,11 +279,16 @@ def prepare_ood(model, label_id_list, dataloader, apply_prefix=True):
         # last CLS!
         out_all_hidden = outputs.hidden_states
         # pooled = out_all_hidden[-1][:, 0, :]
+        # torch.equal(model.score(out_all_hidden[-1])[range(8), x], logits)
         if "gpt" in model.name_or_path: # gpt2: last token for classification
-            pooled = F.normalize(out_all_hidden[-1][:, -1, :],dim=-1)
+            if pad_token_id is not None: # padding is applied 
+                sequence_lengths = torch.ne(batch['input_ids'], pad_token_id).sum(-1) - 1
+                pooled = F.normalize(out_all_hidden[-1][range(len(batch['input_ids'])), sequence_lengths]) # last embedding before padding
+            else: # no padding
+                pooled = F.normalize(out_all_hidden[-1][:, -1, :],dim=-1)
         else:   # roberta/deberta: output[0] of PLM
             pooled = F.normalize(out_all_hidden[-1][:, 0, :],dim=-1)
-            
+        # pdb.set_trace()
 
         if bank is None:
             bank = pooled.clone().detach()
@@ -295,13 +312,18 @@ def prepare_ood(model, label_id_list, dataloader, apply_prefix=True):
 
 def compute_ood(model, input_ids, label_id_list, class_mean, class_var, norm_bank, attention_mask=None, label=None, ind=False, indices=None, is_sigmoid=False):
         outputs = model(input_ids, attention_mask=attention_mask,)
+        pad_token_id = model.config.pad_token_id
 
         # last CLS!
         out_all_hidden = outputs.hidden_states
         # pooled = out_all_hidden[-1][:, 0, :]
         if "gpt" in model.name_or_path: # gpt2: last token for classification
-            pooled = F.normalize(out_all_hidden[-1][:, -1, :],dim=-1)
-        else:   # roberta/deberta: output[0] of PLM, classifier automatically finds CLS to use if you give it the last hidden state
+            if pad_token_id is not None: # padding is applied 
+                sequence_lengths = torch.ne(input_ids, pad_token_id).sum(-1) - 1
+                pooled = F.normalize(out_all_hidden[-1][range(len(input_ids)), sequence_lengths], dim=-1) # last embedding before padding
+            else: # no padding
+                pooled = F.normalize(out_all_hidden[-1][:, -1, :],dim=-1)
+        else:   # roberta/deberta: output[0] of PLM
             pooled = F.normalize(out_all_hidden[-1][:, 0, :],dim=-1)
         logits = outputs[0]
 

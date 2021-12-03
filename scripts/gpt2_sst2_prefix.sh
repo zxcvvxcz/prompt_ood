@@ -1,5 +1,5 @@
-export CUDA_VISIBLE_DEVICES=0
-export num_gpus=1
+export CUDA_VISIBLE_DEVICES=0,1,2
+export num_gpus=3
 export CUBLAS_WORKSPACE_CONFIG=":16:8" # https://docs.nvidia.com/cuda/cublas/index.html#cublasApi_reproducibility
 export PYTHONHASHSEED=0
 export output_dir="./sst2_gpt2_medium"
@@ -22,10 +22,10 @@ for num_prefix in $num_prefixes; do
             --max_seq_length 128 \
             --per_device_train_batch_size 8 \
             --learning_rate $learning_rate \
-            --num_train_epochs 1 \
+            --num_train_epochs 20 \
             --output_dir $output_dir/prefix-tuning/$num_prefix/$learning_rate \
             --overwrite_output_dir \
-            --logging_steps 100 \
+            --logging_steps 10 \
             --logging_dir $output_dir/prefix-tuning/$num_prefix/$learning_rate \
             --evaluation_strategy epoch \
             --save_strategy epoch \

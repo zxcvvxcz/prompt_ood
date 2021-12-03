@@ -10,6 +10,7 @@ export TORCH_DISTRIBUTED_DEBUG=INFO
 
 learning_rates="1e-5"
 for learning_rate in $learning_rates; do
+    # python run_ood.py \
     python -m torch.distributed.launch --nproc_per_node=$num_gpus \
         run_ood.py \
         --model_name_or_path $model_name \

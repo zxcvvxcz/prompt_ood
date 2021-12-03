@@ -592,7 +592,7 @@ def main():
 
     ## TODO : remove?
     training_args.ddp_find_unused_parameters = True
-
+    pdb.set_trace()
     # Initialize our Trainer
     trainer = Trainer(
         model=model,

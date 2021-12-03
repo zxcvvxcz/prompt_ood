@@ -217,7 +217,7 @@ def load_snips(split=False, ratio=0.25):
     
     datasets = {}
     test_ood_datasets = []
-    assert split == True, "Must split banking77!"
+    assert split == True, "Must split snips!"
     
     label_dict = load_split_dict('snips',ratio)
     n_ind_classes = round(7 * ratio) -1

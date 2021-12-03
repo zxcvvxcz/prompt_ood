@@ -1333,8 +1333,8 @@ class GPT2ForSequenceClassification(GPT2PreTrainedModel):
                     f"{self.__class__.__name__} will not detect padding tokens in `inputs_embeds`. Results may be "
                     f"unexpected if using padding tokens in conjunction with `inputs_embeds.`"
                 )
-    
-        pooled_logits = logits[range(batch_size), sequence_lengths]
+        pooled_logits = logits[range(batch_size), sequence_lengths] # 각 input에 대한 마지막 token(padding 직전)이 output이 됨
+        
 
         loss = None
         if labels is not None:

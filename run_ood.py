@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from torch.utils.data import DataLoader
-from utils import load_intent_datasets, collate_fn
+from utils import load_intent_datasets, collate_fn, collate_fn_prefix
 from ood_evaluation import evaluate_ood, prepare_ood
 import pdb
 
@@ -48,6 +48,7 @@ from transformers import (
     Trainer,
     TrainingArguments,
     TrainerCallback,
+    EarlyStoppingCallback,
     default_data_collator,
     set_seed,
 )
@@ -265,6 +266,9 @@ def main():
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    
+    training_args.metric_for_best_model = 'eval_loss'
+    training_args.load_best_model_at_end = True
     print(f'model_args: {model_args}')
     print(f'data_args: {data_args}')
     print(f'training_args: {training_args}')
@@ -561,13 +565,15 @@ def main():
             (examples[sentence1_key],) if sentence2_key is None else (examples[sentence1_key] + " " + examples[sentence2_key],)
         )
         result = tokenizer(*inputs, padding=padding, max_length=max_seq_length, truncation=True)
-        result["label"] = examples["label"] if 'label' in examples else 0
+        if label_to_id is not None and "label" in examples:
+            result["label"] = [(label_to_id[l] if l != -1 else -1) for l in examples["label"]]
+        elif "label" in examples:
+            result["label"] = examples["label"] if 'label' in examples else 0
         result['idx'] = idx
         # TODO : remove
         if model_args.apply_prefix:
             result.pop('attention_mask')
         return result
-
     if data_args.task_name not in intent_tasks:
         datasets = datasets.map(preprocess_function, batched=True, load_from_cache_file=not data_args.overwrite_cache)
     if training_args.do_train:
@@ -584,6 +590,7 @@ def main():
                 train_dataset = train_dataset.select(range(data_args.max_train_samples))
         
     label_id_list = []
+    # pdb.set_trace()
     for train_data in train_dataset:
         label = train_data['label']
         if label not in label_id_list:
@@ -706,10 +713,14 @@ def main():
         compute_metrics=compute_metrics,
         tokenizer=tokenizer,
         data_collator=data_collator,
-        callbacks=[myLogCallback]
+        callbacks=[myLogCallback, EarlyStoppingCallback(early_stopping_patience = 5)]
     )
     # Training
-    maha_dataloader = DataLoader(train_dataset, batch_size=training_args.per_device_train_batch_size, collate_fn=collate_fn) 
+    # maha_dataloader = DataLoader(train_dataset, batch_size=training_args.per_device_train_batch_size, 
+    #                              collate_fn=collate_fn_prefix if model_args.apply_prefix else collate_fn) 
+    maha_dataloader = DataLoader(train_dataset, batch_size=training_args.per_device_train_batch_size, 
+                                 collate_fn=data_collator) 
+    # pdb.set_trace()
             
     if training_args.do_train:
         checkpoint = None
@@ -747,7 +758,8 @@ def main():
             eval_datasets.append(datasets["validation_mismatched"])
 
         for eval_dataset, task in zip(eval_datasets, tasks):
-            metrics = trainer.evaluate(eval_dataset=eval_dataset)
+            # metrics = trainer.evaluate(eval_dataset=eval_dataset)
+            metrics = trainer.evaluate(eval_dataset=test_ind_dataset)
 
             max_val_samples = data_args.max_val_samples if data_args.max_val_samples is not None else len(eval_dataset)
             metrics["eval_samples"] = min(max_val_samples, len(eval_dataset))
@@ -755,45 +767,45 @@ def main():
             trainer.log_metrics("eval", metrics)
             trainer.save_metrics("eval", metrics)
 
-    if training_args.do_predict:
-        logger.info("*** Test ***")
-        output_test_file = os.path.join(training_args.output_dir, f"test_results_{task}.txt")
-        if data_args.task_name in intent_tasks:
-            # use train dataset or eval dataset
-            print("OOD Evaluation...")
-            class_mean, class_var, norm_bank = prepare_ood(trainer.model, label_id_list, maha_dataloader, model_args.apply_prefix)
-            result = evaluate_ood(training_args, data_args, method_name, trainer.model, label_id_list, class_mean, class_var, norm_bank, test_ind_dataset, test_ood_dataset, "test", tokenizer, model_args.apply_prefix)
-            if trainer.is_world_process_zero():
-                with open(output_test_file, "w") as writer:
-                    logger.info(f"***** Test results {task} *****")
-                    writer.write("index\tprediction\n")
-                    for k, v in result.items():
-                        writer.write(f"{k}\t{v}\n")
-        # Loop to handle MNLI double evaluation (matched, mis-matched)
-        else:
-            tasks = [data_args.task_name]
-            test_datasets = [test_dataset]
-            if data_args.task_name == "mnli":
-                tasks.append("mnli-mm")
-                test_datasets.append(datasets["test_mismatched"])
+    # if training_args.do_predict:
+    #     logger.info("*** Test ***")
+    #     output_test_file = os.path.join(training_args.output_dir, f"test_results_{task}.txt")
+    #     if data_args.task_name in intent_tasks:
+    #         # use train dataset or eval dataset
+    #         print("OOD Evaluation...")
+    #         class_mean, class_var, norm_bank = prepare_ood(trainer.model, label_id_list, maha_dataloader, model_args.apply_prefix)
+    #         result = evaluate_ood(training_args, data_args, method_name, trainer.model, label_id_list, class_mean, class_var, norm_bank, test_ind_dataset, test_ood_dataset, "test", tokenizer, model_args.apply_prefix, data_collator)
+    #         if trainer.is_world_process_zero():
+    #             with open(output_test_file, "w") as writer:
+    #                 logger.info(f"***** Test results {task} *****")
+    #                 writer.write("index\tprediction\n")
+    #                 for k, v in result.items():
+    #                     writer.write(f"{k}\t{v}\n")
+    #     # Loop to handle MNLI double evaluation (matched, mis-matched)
+    #     else:
+    #         tasks = [data_args.task_name]
+    #         test_datasets = [test_dataset]
+    #         if data_args.task_name == "mnli":
+    #             tasks.append("mnli-mm")
+    #             test_datasets.append(datasets["test_mismatched"])
 
-            for test_dataset, task in zip(test_datasets, tasks):
-                # Removing the `label` columns because it contains -1 and Trainer won't like that.
-                test_dataset.remove_columns_("label")
-                logits = trainer.predict(test_dataset=test_dataset).predictions
-                predictions = np.squeeze(logits) if is_regression else np.argmax(logits, axis=1)
+    #         for test_dataset, task in zip(test_datasets, tasks):
+    #             # Removing the `label` columns because it contains -1 and Trainer won't like that.
+    #             test_dataset.remove_columns_("label")
+    #             logits = trainer.predict(test_dataset=test_dataset).predictions
+    #             predictions = np.squeeze(logits) if is_regression else np.argmax(logits, axis=1)
 
                 
-                if trainer.is_world_process_zero():
-                    with open(output_test_file, "w") as writer:
-                        logger.info(f"***** Test results {task} *****")
-                        writer.write("index\tprediction\n")
-                        for index, item in enumerate(predictions):
-                            if is_regression:
-                                writer.write(f"{index}\t{item:3.3f}\n")
-                            else:
-                                item = label_list[item]
-                                writer.write(f"{index}\t{item}\n")
+    #             if trainer.is_world_process_zero():
+    #                 with open(output_test_file, "w") as writer:
+    #                     logger.info(f"***** Test results {task} *****")
+    #                     writer.write("index\tprediction\n")
+    #                     for index, item in enumerate(predictions):
+    #                         if is_regression:
+    #                             writer.write(f"{index}\t{item:3.3f}\n")
+    #                         else:
+    #                             item = label_list[item]
+    #                             writer.write(f"{index}\t{item}\n")
 
 
 def _mp_fn(index):
