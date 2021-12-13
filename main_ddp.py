@@ -34,7 +34,7 @@ def main():
     
     
     # subprocess.call(ddp_script, shell=True)
-    bash_script = 'bash main_ddp.sh'
+    bash_script = 'bash ood_scripts/gpt2_clinc150.sh'
     subprocess.call(bash_script, shell=True)
 
 
