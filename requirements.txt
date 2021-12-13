@@ -1,9 +1,8 @@
-transformers==4.3.0
+# transformers==4.3.0
 loralib
 nltk
 scikit-learn
 matplotlib
-accelerate
 datasets
 hydra-core
-
+sentencepiece # T5

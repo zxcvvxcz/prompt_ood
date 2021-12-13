@@ -306,7 +306,7 @@ def prepare_ood(model, label_id_list, dataloader, apply_prefix=True):
     precision = LedoitWolf().fit(centered_bank).precision_.astype(np.float32)
     class_var = torch.from_numpy(precision).float().cuda()
     print("Preparation for OOD done...")
-    pdb.set_trace()
+    # pdb.set_trace()
     return class_mean, class_var, norm_bank, all_classes
 
 

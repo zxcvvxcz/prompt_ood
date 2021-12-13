@@ -7,7 +7,6 @@ export model_name="gpt2-medium"
 export output_dir="~/data/eff_tl"
 export split_ratio=0.5
 export TORCH_DISTRIBUTED_DEBUG=INFO
-
 learning_rates="1e-5"
 
 for learning_rate in $learning_rates; do

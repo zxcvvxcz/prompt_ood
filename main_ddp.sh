@@ -3,8 +3,8 @@ export num_gpus=4
 export CUBLAS_WORKSPACE_CONFIG=":16:8" # https://docs.nvidia.com/cuda/cublas/index.html#cublasApi_reproducibility
 export PYTHONHASHSEED=0
 export task_name="clinc150"
-export model_name="gpt2-medium"
-export output_dir="~/data/eff_tl"
+export model_name="gpt2-large"
+export output_dir="~/share/data/eff_tl"
 export split_ratio="full"
 export TORCH_DISTRIBUTED_DEBUG=INFO
 
@@ -12,7 +12,7 @@ learning_rates="1e-5"
 
 for learning_rate in $learning_rates; do
     # python run_ood.py \
-    python -m torch.distributed.launch --nproc_per_node=$num_gpus \
+    python -m torch.distributed.launch --nproc_per_node=$num_gpus --master_port="8888" \
         run_ood.py \
         --model_name_or_path $model_name \
         --task_name $task_name \
@@ -20,8 +20,8 @@ for learning_rate in $learning_rates; do
         --do_eval \
         --do_predict \
         --max_seq_length 128 \
-        --per_device_train_batch_size 8 \
-        --per_device_eval_batch_size 8 \
+        --per_device_train_batch_size 2 \
+        --per_device_eval_batch_size 2 \
         --learning_rate $learning_rate \
         --num_train_epochs 20 \
         --split False \

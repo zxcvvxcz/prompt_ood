@@ -1,5 +1,5 @@
-export CUDA_VISIBLE_DEVICES=0
-export num_gpus=1
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+export num_gpus=4
 export CUBLAS_WORKSPACE_CONFIG=":16:8" # https://docs.nvidia.com/cuda/cublas/index.html#cublasApi_reproducibility
 export PYTHONHASHSEED=0
 export task_name="banking77"
