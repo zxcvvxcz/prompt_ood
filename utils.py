@@ -11,14 +11,14 @@ task_to_keys = {
     'banking77': ("text", None),
 }
 
-def load_intent_datasets(task_name, tokenizer=None, max_seq_length=512, split=False, ratio=0.25):
+def load_intent_datasets(task_name, tokenizer=None, max_seq_length=512, split=False, ratio=0.25, check_data=False):
     print("Loading {}".format(task_name))
     if task_name == 'clinc150':
-        datasets, label_list  = load_clinc150(split=split, ratio=ratio)
+        datasets, label_list  = load_clinc150(split=split, ratio=ratio, check_data=check_data)
     elif task_name == 'banking77':
-        datasets, label_list = load_banking77(split=split, ratio=ratio)
+        datasets, label_list = load_banking77(split=split, ratio=ratio, check_data=check_data)
     elif task_name == 'snips':
-        datasets, label_list = load_snips(split=split, ratio=ratio)
+        datasets, label_list = load_snips(split=split, ratio=ratio, check_data=check_data)
 
 
     return datasets, label_list 
@@ -55,7 +55,7 @@ def load_split_dict(dset_name, ratio):
     return split_label_dict
 
 
-def load_clinc150(split=False, ratio=0.25):
+def load_clinc150(split=False, ratio=0.25, check_data=False):
     root_dir = './data/clinc150'
     print(f"split:{split}, ratio:{ratio}")
     source_path = os.path.join(root_dir, 'data_full.json')
@@ -127,7 +127,10 @@ def load_clinc150(split=False, ratio=0.25):
                 text, intent = line
                 intent_label = int (intents_val.index(intent))
                 split_label = label_dict[intent_label]
-                example = {'text': text, 'label': split_label}
+                if check_data:
+                    example = {'text': text, 'label': split_label, 'label_text': intent, 'indices': i}
+                else:
+                    example = {'text': text, 'label': split_label}
 
                 # print(example)
                 if mode == 'train':
@@ -146,7 +149,7 @@ def load_clinc150(split=False, ratio=0.25):
     datasets = {'train': train_dataset, 'validation': dev_dataset, 'test_ind': test_ind_dataset, 'test_ood': test_ood_dataset}
     return datasets, label_list
 
-def load_banking77(split=False, ratio=0.25):
+def load_banking77(split=False, ratio=0.25, check_data=False):
     category_path = os.path.join('data', 'banking77', 'categories.json')
     with open(category_path, 'r') as f:
         categories = json.load(f)
@@ -159,6 +162,7 @@ def load_banking77(split=False, ratio=0.25):
     dev_dataset = []
     test_ind_dataset = []
     test_ood_dataset = []
+
     for mode in ['train', 'valid', 'test']:
         data_path = os.path.join('data', 'banking77', mode)
         label_path = os.path.join(data_path, 'label')
@@ -170,27 +174,20 @@ def load_banking77(split=False, ratio=0.25):
         with open(text_path, 'r', encoding='utf-8') as f:
             texts = f.readlines()
             texts = [text.rstrip('\n') for text in texts]
-            
-        examples = []
-        for text, label in zip(texts, labels):
-            label_num = categories.index(label)
-            examples.append({'text': text, 'label': label_num})
-    
-        datasets[mode] = examples
 
-        if mode == 'train':
-            for text, label in zip(texts, labels):
-                if label_dict[categories.index(label)] <= n_ind_classes:
-                    example = {'text': text, 'label': label_dict[categories.index(label)]}
-                    train_dataset.append(example)
-        elif mode == 'valid':
-            for text, label in zip(texts, labels):
-                if label_dict[categories.index(label)] <= n_ind_classes:
-                    example = {'text': text, 'label': label_dict[categories.index(label)]}
-                    dev_dataset.append(example)
-        elif mode == 'test':
-            for text, label in zip(texts, labels):
+        for i, (text, label) in enumerate(zip(texts, labels)):
+            if check_data:
+                example = {'text': text, 'label': label_dict[categories.index(label)], 'label_text': label}
+            else:
                 example = {'text': text, 'label': label_dict[categories.index(label)]}
+                
+            if mode == 'train':
+                if label_dict[categories.index(label)] <= n_ind_classes: 
+                    train_dataset.append(example)
+            elif mode == 'valid':
+                if label_dict[categories.index(label)] <= n_ind_classes: 
+                    dev_dataset.append(example)
+            elif mode == 'test':
                 if label_dict[categories.index(label)] <= n_ind_classes:
                     test_ind_dataset.append(example)
                 else:
@@ -210,7 +207,7 @@ def load_banking77(split=False, ratio=0.25):
     return datasets, label_list
 
 
-def load_snips(split=False, ratio=0.25):
+def load_snips(split=False, ratio=0.25, check_data=False):
     # category_path = os.path.join('data', 'banking77', 'categories.json')
     # with open(category_path, 'r') as f:
     categories = {}
@@ -243,23 +240,23 @@ def load_snips(split=False, ratio=0.25):
             texts = f.readlines()
             texts = [text.rstrip('\n') for text in texts]
 
-        if mode == 'train':
-            for text, label in zip(texts, labels):
-                if label_dict[categories[label]] <= n_ind_classes:
-                    example = {'text': text, 'label': label_dict[categories[label]]}
-                    train_dataset.append(example)
-        elif mode == 'valid':
-            for text, label in zip(texts, labels):
-                if label_dict[categories[label]] <= n_ind_classes:
-                    example = {'text': text, 'label': label_dict[categories[label]]}
-                    dev_dataset.append(example)
-        elif mode == 'test':
-            for text, label in zip(texts, labels):
+        for i, (text, label) in enumerate(zip(texts, labels)):
+            if check_data:
+                example = {'text': text, 'label': label_dict[categories[label]], 'label_text': label, 'indices': i}
+            else:
                 example = {'text': text, 'label': label_dict[categories[label]]}
+            if mode == 'train':
+                if label_dict[categories[label]] <= n_ind_classes:
+                    train_dataset.append(example)
+            elif mode == 'valid':
+                if label_dict[categories[label]] <= n_ind_classes:
+                    dev_dataset.append(example)
+            elif mode == 'test':
                 if label_dict[categories[label]] <= n_ind_classes:
                     test_ind_dataset.append(example)
                 else:
                     test_ood_dataset.append(example)
+                    
     label_list = []
     label_name_path = os.path.join('data', 'snips', f'labels_{ratio}.json')
     with open(label_name_path) as f:
@@ -275,28 +272,32 @@ def load_snips(split=False, ratio=0.25):
     return datasets, label_list
 
 
-def collate_fn(batch):
+def collate_fn(batch, pad_token_id=50256):
     max_len = max([len(f["input_ids"]) for f in batch])
-    input_ids = [f["input_ids"] + [0] * (max_len - len(f["input_ids"])) for f in batch]
-    input_mask = [[1.0] * len(f["input_ids"]) + [0.0] * (max_len - len(f["input_ids"])) for f in batch]
+    input_ids = [f["input_ids"] + [pad_token_id] * (max_len - len(f["input_ids"])) for f in batch]
+    input_mask = []
+    for f in batch:
+        last_true_token_idx = f['input_ids'].index(pad_token_id) if pad_token_id in f['input_ids'] else len(f['input_ids'])
+        input_mask.append([1.0] * last_true_token_idx + [0.0] * (max_len - last_true_token_idx))
+    # input_mask = [[1.0] * len(f["input_ids"]) + [0.0] * (max_len - len(f["input_ids"])) for f in batch]
     labels = [f["label"] for f in batch]
     input_ids = torch.tensor(input_ids, dtype=torch.long)
     input_mask = torch.tensor(input_mask, dtype=torch.float)
     labels = torch.tensor(labels, dtype=torch.long)
-    
+
     if 'indices' in batch[0]:
         indices = torch.LongTensor([f["indices"] for f in batch])
         outputs = {
             "input_ids": input_ids,
             "attention_mask": input_mask,
-            "label": labels,
+            "labels": labels,
             "indices": indices,
         }
     else:
         outputs = {
             "input_ids": input_ids,
             "attention_mask": input_mask,
-            "label": labels,
+            "labels": labels,
         }
     return outputs
 
@@ -322,3 +323,37 @@ def collate_fn_prefix(batch):
         }
     return outputs
 
+
+def collate_fn_debug(batch, pad_token_id=50256):
+    max_len = max([len(f["input_ids"]) for f in batch])
+    input_ids = [f["input_ids"] + [0] * (max_len - len(f["input_ids"])) for f in batch]
+    input_mask = []
+    for f in batch:
+        last_true_token_idx = f['attention_mask'].index(pad_token_id) if pad_token_id in f['attention_mask'] else len(f['input_ids'])
+        input_mask.append([1.0] * last_true_token_idx + [0.0] * (max_len - last_true_token_idx))
+    labels = [f["label"] for f in batch]
+    sentences = [f['text'] for f in batch]
+    label_txt = [f['label_text'] for f in batch]
+    input_ids = torch.tensor(input_ids, dtype=torch.long)
+    input_mask = torch.tensor(input_mask, dtype=torch.float)
+    labels = torch.tensor(labels, dtype=torch.long)
+    
+    if 'indices' in batch[0]:
+        indices = torch.LongTensor([f["indices"] for f in batch])
+        outputs = {
+            "input_ids": input_ids,
+            "attention_mask": input_mask,
+            "labels": labels,
+            "indices": indices,
+            'text': sentences,
+            'label_text': label_txt,
+        }
+    else:
+        outputs = {
+            "input_ids": input_ids,
+            "attention_mask": input_mask,
+            "labels": labels,
+            'text': sentences,
+            'label_text': label_txt,
+        }
+    return outputs

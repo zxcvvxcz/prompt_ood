@@ -11,8 +11,9 @@ export TORCH_DISTRIBUTED_DEBUG=INFO
 learning_rates="1e-5"
 
 for learning_rate in $learning_rates; do
-    python -m torch.distributed.launch --nproc_per_node=$num_gpus \
-        run_ood.py \
+    # python -m torch.distributed.launch --nproc_per_node=$num_gpus \
+    #     run_ood.py \
+    python run_ood.py \
         --model_name_or_path $model_name \
         --task_name $task_name \
         --do_train \
@@ -22,7 +23,7 @@ for learning_rate in $learning_rates; do
         --per_device_train_batch_size 8 \
         --per_device_eval_batch_size 8 \
         --learning_rate $learning_rate \
-        --num_train_epochs 1 \
+        --num_train_epochs 20 \
         --output_dir $output_dir/$model_name/$task_name/lora/$split_ratio/$learning_rate \
         --overwrite_output_dir \
         --logging_steps 10 \

@@ -1,3 +1,4 @@
+from functools import partial
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -16,9 +17,6 @@ import os
 from tqdm import tqdm
 from utils import collate_fn, collate_fn_prefix
 from sklearn.metrics import roc_auc_score
-from accelerate import Accelerator
-
-accelerator = Accelerator()
 
 
 def merge_keys(l, keys):
@@ -57,14 +55,15 @@ def merge_keys(l, keys):
     return new_dict
 
 
-def evaluate_ood(training_args, data_args, method_name, model, label_id_list, class_mean, class_var, norm_bank, features, ood, tag, tokenizer, apply_prefix=False, data_collator=collate_fn):
+def evaluate_ood(training_args, data_args, method_name, model, label_id_list, class_mean, 
+                 class_var, norm_bank, features, ood, tag, tokenizer, apply_prefix=False):
     print('Start evaluation for OOD...')
     keys = ['softmax', 'maha', 'cosine', 'energy','maha_acc']
-
-    # dataloader = DataLoader(features, batch_size=training_args.per_device_eval_batch_size, 
-    #                         collate_fn=collate_fn_prefix if apply_prefix else collate_fn)
+    collate_fn_partial = partial(collate_fn, pad_token_id=model.config.pad_token_id)
     dataloader = DataLoader(features, batch_size=training_args.per_device_eval_batch_size, 
-                            collate_fn=data_collator)
+                            collate_fn=collate_fn_prefix if apply_prefix else collate_fn_partial)
+    # dataloader = DataLoader(features, batch_size=training_args.per_device_eval_batch_size, 
+    #                         collate_fn=data_collator)
     in_scores = []
     model.eval()
     for batch in tqdm(dataloader, desc='Scoring testset(IND)'):
@@ -77,10 +76,10 @@ def evaluate_ood(training_args, data_args, method_name, model, label_id_list, cl
             in_scores.append(ood_keys)
     in_scores = merge_keys(in_scores, keys)
     
-    # dataloader = DataLoader(ood, batch_size=training_args.per_device_eval_batch_size, 
-    #                         collate_fn=collate_fn_prefix if apply_prefix else collate_fn)
     dataloader = DataLoader(ood, batch_size=training_args.per_device_eval_batch_size, 
-                            collate_fn=data_collator)
+                            collate_fn=collate_fn_prefix if apply_prefix else collate_fn_partial)
+    # dataloader = DataLoader(ood, batch_size=training_args.per_device_eval_batch_size, 
+    #                         collate_fn=data_collator)
     out_scores = []
     out_labels_origin = []
     model.eval()
@@ -92,7 +91,7 @@ def evaluate_ood(training_args, data_args, method_name, model, label_id_list, cl
             ood_keys = compute_ood(model, **batch, label_id_list=label_id_list, class_mean=class_mean, 
                                          class_var=class_var, norm_bank=norm_bank, ind = False)
             out_scores.append(ood_keys)
-            out_labels_origin.extend(batch['label'].tolist())
+            out_labels_origin.extend(batch['labels'].tolist())
     out_scores = merge_keys(out_scores, keys)
     
     # get mahalanobis distance of in-domain for histogram
@@ -288,7 +287,6 @@ def prepare_ood(model, label_id_list, dataloader, apply_prefix=True):
                 pooled = F.normalize(out_all_hidden[-1][:, -1, :],dim=-1)
         else:   # roberta/deberta: output[0] of PLM
             pooled = F.normalize(out_all_hidden[-1][:, 0, :],dim=-1)
-        # pdb.set_trace()
 
         if bank is None:
             bank = pooled.clone().detach()
@@ -299,18 +297,20 @@ def prepare_ood(model, label_id_list, dataloader, apply_prefix=True):
 
     norm_bank = F.normalize(bank, dim=-1)
     N, d = bank.size()
-
-    class_mean = torch.zeros(max(label_id_list) + 1, d).cuda()
-    for c in label_id_list:
+    all_classes = list(set(label_bank.tolist()))
+    class_mean = torch.zeros(max(all_classes) + 1, d).cuda()
+    # class_mean = torch.zeros(max(label_id_list) + 1, d).cuda()
+    for c in all_classes:
         class_mean[c] = (bank[label_bank == c].mean(0))
     centered_bank = (bank - class_mean[label_bank]).detach().cpu().numpy()
     precision = LedoitWolf().fit(centered_bank).precision_.astype(np.float32)
     class_var = torch.from_numpy(precision).float().cuda()
     print("Preparation for OOD done...")
-    return class_mean, class_var, norm_bank
+    pdb.set_trace()
+    return class_mean, class_var, norm_bank, all_classes
 
 
-def compute_ood(model, input_ids, label_id_list, class_mean, class_var, norm_bank, attention_mask=None, label=None, ind=False, indices=None, is_sigmoid=False):
+def compute_ood(model, input_ids, label_id_list, class_mean, class_var, norm_bank, attention_mask=None, labels=None, ind=False, indices=None, is_sigmoid=False):
         outputs = model(input_ids, attention_mask=attention_mask,)
         pad_token_id = model.config.pad_token_id
 
@@ -337,8 +337,7 @@ def compute_ood(model, input_ids, label_id_list, class_mean, class_var, norm_ban
 
         for c in label_id_list:
             centered_pooled = pooled - class_mean[c].unsqueeze(0)
-            ms = torch.diag(centered_pooled @ class_var @
-                            centered_pooled.t())
+            ms = torch.diag(centered_pooled @ class_var @ centered_pooled.t())
             maha_score.append(ms)
         maha_score = torch.stack(maha_score, dim=-1)
 
@@ -347,9 +346,9 @@ def compute_ood(model, input_ids, label_id_list, class_mean, class_var, norm_ban
 
         if ind == True:
             if is_sigmoid == True:
-                correct = (label == sig_pred).float().sum()
+                correct = (labels == sig_pred).float().sum()
             else:
-                correct = (label == pred).float().sum()
+                correct = (labels == pred).float().sum()
         else:
             correct = 0
 
@@ -358,7 +357,6 @@ def compute_ood(model, input_ids, label_id_list, class_mean, class_var, norm_ban
         cosine_score = cosine_score.max(-1)[0]
 
         energy_score = torch.logsumexp(logits, dim=-1)
-
         ood_keys = {
             'softmax': softmax_score.tolist(),
             'maha': maha_score.tolist(),

@@ -24,12 +24,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
-
+from functools import partial
 from dataclasses import dataclass, field
 from typing import Optional
 
 from torch.utils.data import DataLoader
-from utils import load_intent_datasets, collate_fn, collate_fn_prefix
+from utils import load_intent_datasets, collate_fn, collate_fn_prefix, collate_fn_debug, load_split_dict
 from ood_evaluation import evaluate_ood, prepare_ood
 import pdb
 
@@ -74,9 +74,9 @@ task_to_keys = {
     'banking77': ("text", None),
 }
 
-intent_tasks=['clinc150', 'snips', 'banking77']
-dataloader_cols = ['input_ids', 'attention_mask', 'label']
-
+intent_tasks = ['clinc150', 'snips', 'banking77']
+dataloader_cols = ['input_ids', 'attention_mask', 'label', 'text', 'indices', 'label_text']
+CHECK_DATA = False
 logger = logging.getLogger(__name__)
 
 
@@ -331,7 +331,8 @@ def main():
     # In distributed training, the load_dataset function guarantee that only one local process can concurrently
     # download the dataset.
     if data_args.task_name in ['clinc150', 'snips', 'banking77']:
-        datasets, label_list = load_intent_datasets(data_args.task_name, split=data_args.split, ratio=data_args.split_ratio)
+        datasets, label_list = load_intent_datasets(data_args.task_name, split=data_args.split, ratio=data_args.split_ratio, check_data=CHECK_DATA)
+
     elif data_args.task_name is not None:
         # Downloading and loading a dataset from the hub.
         datasets = load_dataset("glue", data_args.task_name)
@@ -569,7 +570,11 @@ def main():
             result["label"] = [(label_to_id[l] if l != -1 else -1) for l in examples["label"]]
         elif "label" in examples:
             result["label"] = examples["label"] if 'label' in examples else 0
-        result['idx'] = idx
+        # result['idx'] = idx
+        # result['text'] = examples['text']
+        if 'indices' in examples:
+            result['indices'] = examples['indices']
+        # result['label_text'] = examples['label_text']
         # TODO : remove
         if model_args.apply_prefix:
             result.pop('attention_mask')
@@ -590,7 +595,6 @@ def main():
                 train_dataset = train_dataset.select(range(data_args.max_train_samples))
         
     label_id_list = []
-    # pdb.set_trace()
     for train_data in train_dataset:
         label = train_data['label']
         if label not in label_id_list:
@@ -687,8 +691,9 @@ def main():
             result['mse'] = ((preds - p.label_ids) ** 2).mean().item()
         else:
             result['IND accuracy'] = (preds == p.label_ids).astype(np.float32).mean().item()
-            class_mean, class_var, norm_bank = prepare_ood(trainer.model, label_id_list, maha_dataloader, model_args.apply_prefix)
-            ood_result = evaluate_ood(training_args, data_args, method_name, trainer.model, label_id_list, class_mean, class_var, norm_bank, test_ind_dataset, test_ood_dataset, "test", tokenizer, model_args.apply_prefix)
+            class_mean, class_var, norm_bank, all_classes = prepare_ood(trainer.model, label_id_list, maha_dataloader, model_args.apply_prefix)
+            ood_result = evaluate_ood(training_args, data_args, method_name, trainer.model, label_id_list, class_mean, 
+                                      class_var, norm_bank, test_ind_dataset, test_ood_dataset, "test", tokenizer, model_args.apply_prefix)
             result.update(ood_result)
         return result
 
@@ -702,7 +707,7 @@ def main():
 
     ## TODO : remove?
     training_args.ddp_find_unused_parameters = True
-
+    collate_fn_partial = partial(collate_fn, pad_token_id=config.pad_token_id)
     # Initialize our Trainer
     print(f"Tokenizer: {tokenizer}")
     trainer = Trainer(
@@ -712,16 +717,69 @@ def main():
         eval_dataset=eval_dataset if training_args.do_eval else None,
         compute_metrics=compute_metrics,
         tokenizer=tokenizer,
-        data_collator=data_collator,
+        # data_collator=data_collator,
+        # data_collator=collate_fn_debug,
+        data_collator=collate_fn_prefix if model_args.apply_prefix else collate_fn_partial,
         callbacks=[myLogCallback, EarlyStoppingCallback(early_stopping_patience = 5)]
     )
     # Training
-    # maha_dataloader = DataLoader(train_dataset, batch_size=training_args.per_device_train_batch_size, 
-    #                              collate_fn=collate_fn_prefix if model_args.apply_prefix else collate_fn) 
     maha_dataloader = DataLoader(train_dataset, batch_size=training_args.per_device_train_batch_size, 
-                                 collate_fn=data_collator) 
-    # pdb.set_trace()
-            
+                                 collate_fn=collate_fn_prefix if model_args.apply_prefix else collate_fn_partial) 
+    # maha_dataloader = DataLoader(train_dataset, batch_size=training_args.per_device_train_batch_size, 
+    #                              collate_fn=collate_fn_debug) 
+    print(train_dataset[0])
+    with open('train_check.tsv', 'w') as f:
+        csv_writer = csv.writer(f, delimiter='\t')
+        first_write = True
+        for batch in maha_dataloader:
+            # pdb.set_trace()
+            row = []
+            if first_write:
+                first_write = False
+                for k in batch.keys():
+                    if k not in ['input_ids', 'attention_mask']:
+                        row.append(k)
+                row.append('label list')
+            else:
+                for k, v in batch.items():
+                    if k not in ['input_ids', 'attention_mask']:
+                        row.append(v)
+                row.append([label_list[batch['labels'][i]][0] for i in range(len(batch['labels']))])
+            csv_writer.writerow(row)
+    tr_dl = trainer.get_train_dataloader()
+    with open('train_check_trainer.tsv', 'w') as f:
+        csv_writer = csv.writer(f, delimiter='\t')
+        first_write = True
+        for batch in tr_dl:
+            row = []
+            if first_write:
+                first_write = False
+                for k in batch.keys():
+                    if k not in ['input_ids', 'attention_mask']:
+                        row.append(k)
+                row.append('label list')
+            else:
+                for k, v in batch.items():
+                    if k not in ['input_ids', 'attention_mask']:
+                        row.append(v)
+                row.append([label_list[batch['labels'][i]][0] for i in range(len(batch['labels']))])
+            csv_writer.writerow(row)
+    ev_dl = trainer.get_eval_dataloader()
+    with open('eval_check.tsv', 'w') as f:
+        csv_writer = csv.writer(f, delimiter='\t')
+        first_write = True
+        for batch in ev_dl:
+            row = []
+            if first_write:
+                for k in batch.keys():
+                    if k not in ['input_ids', 'attention_mask']:
+                        row.append(k)
+                    first_write = False
+            else:
+                for k, v in batch.items():
+                    if k not in ['input_ids', 'attention_mask']:
+                        row.append(v)
+            csv_writer.writerow(row)
     if training_args.do_train:
         checkpoint = None
         if last_checkpoint is not None:
