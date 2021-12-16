@@ -118,3 +118,56 @@ python
 bash ood_scripts/gpt2_banking77_0.5_lora.sh 
 python
 exit
+cd ~/data/
+ls
+cd eff_tl/
+ls
+exit
+cd ~
+bash ood_scripts/gpt2_snips_0.5.sh
+apt update
+apt upgrade -y
+conda update conda -y
+conda update --all -y
+conda clean --all -y
+pip cache purge
+exit
+cd ~
+ls
+cat run_ood.py
+bash ood_scripts/gpt2_banking77_0.5.sh 
+bash ood_scripts/gpt2_banking77_0.5.sh 
+bash ood_scripts/gpt2_banking77_0.5.sh 
+bash ood_scripts/gpt2_banking77_0.5.sh 
+bash ood_scripts/gpt2_banking77_0.5.sh 
+bash ood_scripts/gpt2_banking77_0.5.sh 
+bash ood_scripts/gpt2_banking77_0.5.sh 
+bash ood_scripts/gpt2_banking77_0.5.sh 
+bash ood_scripts/gpt2_snips_0.5.sh 
+bash ood_scripts/gpt2_snips_0.5.sh 
+bash ood_scripts/gpt2_snips_0.5.sh 
+bash ood_scripts/gpt2_all.sh 
+cd ~
+bash ood_scripts/gpt2_banking77_0.5_lora.sh 
+ls
+bash ood_scripts/gpt2_clinc150.sh 
+bash ood_scripts/gpt2_banking77_0.5.sh 
+bash ood_scripts/gpt2_banking77_0.5.sh 
+bash ood_scripts/gpt2_clinc150_0.5.sh
+ls
+ls
+exit
+ls
+cd ~
+cd DeepSpeed/
+ls
+DS_BUILD_OPS=1 pip install . -v | tee build.log
+pip install -U py-cpuinfo
+apt install cmake
+apt install libaio-dev
+DS_BUILD_OPS=1 pip install . -v | tee build.log
+ds_report
+ls
+cd ..
+ls
+exit

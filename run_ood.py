@@ -602,7 +602,7 @@ def main():
         label = train_data['label']
         if label not in label_id_list:
             label_id_list.append(label)
-        
+    label_id_list.sort()
         
         
     if training_args.do_eval:
@@ -735,7 +735,6 @@ def main():
         csv_writer = csv.writer(f, delimiter='\t')
         first_write = True
         for batch in maha_dataloader:
-            # pdb.set_trace()
             row = []
             if first_write:
                 first_write = False
@@ -747,7 +746,7 @@ def main():
                 for k, v in batch.items():
                     if k not in ['input_ids', 'attention_mask']:
                         row.append(v)
-                row.append([label_list[batch['labels'][i]][0] for i in range(len(batch['labels']))])
+                row.append([label_list[batch['labels'][i]] for i in range(len(batch['labels']))])
             csv_writer.writerow(row)
     tr_dl = trainer.get_train_dataloader()
     with open('train_check_trainer.tsv', 'w') as f:
@@ -765,7 +764,7 @@ def main():
                 for k, v in batch.items():
                     if k not in ['input_ids', 'attention_mask']:
                         row.append(v)
-                row.append([label_list[batch['labels'][i]][0] for i in range(len(batch['labels']))])
+                row.append([label_list[batch['labels'][i]] for i in range(len(batch['labels']))])
             csv_writer.writerow(row)
     ev_dl = trainer.get_eval_dataloader()
     with open('eval_check.tsv', 'w') as f:
@@ -783,6 +782,7 @@ def main():
                     if k not in ['input_ids', 'attention_mask']:
                         row.append(v)
             csv_writer.writerow(row)
+    
     if training_args.do_train:
         checkpoint = None
         if last_checkpoint is not None:

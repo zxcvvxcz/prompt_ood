@@ -306,7 +306,7 @@ def prepare_ood(model, label_id_list, dataloader, apply_prefix=True):
     precision = LedoitWolf().fit(centered_bank).precision_.astype(np.float32)
     class_var = torch.from_numpy(precision).float().cuda()
     print("Preparation for OOD done...")
-    # pdb.set_trace()
+    
     return class_mean, class_var, norm_bank, all_classes
 
 
@@ -351,7 +351,11 @@ def compute_ood(model, input_ids, label_id_list, class_mean, class_var, norm_ban
                 correct = (labels == pred).float().sum()
         else:
             correct = 0
-
+        # path = 'IND result.txt' if ind else 'OOD result.txt'
+        # with open(path, 'a') as f:
+        #     f.write(f'gt:{labels}\t maha_pred:{pred}\n')
+        
+        
         norm_pooled = F.normalize(pooled, dim=-1)
         cosine_score = norm_pooled @ norm_bank.t()
         cosine_score = cosine_score.max(-1)[0]
