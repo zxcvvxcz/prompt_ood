@@ -2,3 +2,6 @@
 Dockerfile
 docker_build.sh
 .bash_history
+.python_history
+*.log
+.cache

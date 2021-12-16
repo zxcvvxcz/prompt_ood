@@ -170,4 +170,29 @@ ds_report
 ls
 cd ..
 ls
+cd ~
+bash deepspeed.sh 
+cd DeepSpeed/
+bash deepspeed.sh 
+cd ..
+python
+cd /opt/conda/lib/python3.7/site-packages/
+ls
+rm transformers
+rm -r transformers
+cd ~
+ls
+python main.py 
+python setup.py install
+python main.py 
+ls -a
+rm -r .cache/
+exit
+cd ~
+python main.py
+python main_ddp.py
+ls
+cat test.py 
+nvidia-smi
+nvcc -V
 exit

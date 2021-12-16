@@ -139,3 +139,10 @@ data/eff_tl
 .bash_history
 .python_history
 DeepSpeed
+.cache
+.conda
+.config
+.nv
+model_data
+setup.py
+setup.cfg
